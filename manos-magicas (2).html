@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Manos mágicas</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,sans-serif;color:#e8e6ff}
+video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);opacity:1;transition:opacity .3s}
+canvas{position:absolute;inset:0;width:100%;height:100%}
+#msg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);text-align:center;background:rgba(0,0,0,.7);border:1px solid #7F77DD;padding:20px 28px;border-radius:10px;max-width:90%}
+#msg button{margin-top:14px;font:inherit;font-size:16px;padding:10px 18px;border-radius:8px;border:1px solid #AFA9EC;background:#26215C;color:#fff;cursor:pointer}
+#hud{position:absolute;left:16px;bottom:16px;font-size:13px;background:rgba(0,0,0,.6);padding:8px 12px;border-radius:6px;line-height:1.6}
+#bar{position:absolute;right:16px;top:16px;display:flex;flex-direction:column;gap:8px;align-items:flex-end}
+#bar button{font:inherit;font-size:14px;padding:8px 12px;border-radius:6px;border:1px solid #7F77DD;background:rgba(0,0,0,.6);color:#e8e6ff;cursor:pointer}
+#efx{font-size:16px!important;border-color:#fff!important}
+</style>
+</head>
+<body>
+<video id="cam" playsinline muted></video>
+<canvas id="c"></canvas>
+<div id="bar">
+<button id="efx">Efecto: fuego</button>
+<button id="colbtn" hidden>Color del trazo</button>
+<button id="borrar" hidden>Borrar todo (B)</button>
+<button id="cambtn">Cámara: visible</button>
+<button id="fs">Pantalla completa</button>
+</div>
+<div id="hud">Cambia de efecto con el botón o la barra espaciadora · junta pulgar e índice para explotar</div>
+<div id="msg">Los efectos seguirán tus dedos.<br>Necesito permiso para usar la cámara.<br><button id="go">Activar cámara</button></div>
+<script type="module">
+import {FilesetResolver,HandLandmarker} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+const c=document.getElementById('c'),x=c.getContext('2d'),video=document.getElementById('cam'),msg=document.getElementById('msg');
+let W,H;function rs(){W=c.width=innerWidth;H=c.height=innerHeight}rs();addEventListener('resize',rs);
+const TIPS=[4,8,12,16,20];
+const LINKS=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+const EFECTOS=['fuego','rayos','hielo','arcoíris','escribir'];let ef=0;
+const COLORES=['#33f0ff','#ff3df2','#ffe03d','#5dff6b','#ff5a3d','#ffffff'];let ci=0;
+let trazos=[],actual=[null,null],suave=[null,null],cursorMano=[];
+function dedoArriba(h,tip,pip){return Math.hypot(h[tip].x-h[0].x,h[tip].y-h[0].y)>Math.hypot(h[pip].x-h[0].x,h[pip].y-h[0].y)*1.1}
+function escribir(){
+  cursorMano=[];
+  hands.forEach((h,i)=>{
+    const p=h[8];suave[i]=suave[i]?{x:suave[i].x+(p.x-suave[i].x)*.5,y:suave[i].y+(p.y-suave[i].y)*.5}:{x:p.x,y:p.y};
+    const dibuja=dedoArriba(h,8,6)&&!dedoArriba(h,12,10)&&!dedoArriba(h,16,14);
+    cursorMano.push({p:suave[i],dibuja});
+    if(dibuja){if(!actual[i]){actual[i]={c:COLORES[ci],pts:[]};trazos.push(actual[i])}const l=actual[i].pts.at(-1);if(!l||Math.hypot(l.x-suave[i].x,l.y-suave[i].y)>2)actual[i].pts.push({...suave[i]})}
+    else actual[i]=null;
+  });
+  for(let i=hands.length;i<2;i++){actual[i]=null;suave[i]=null}
+  x.clearRect(0,0,W,H);x.lineCap='round';x.lineJoin='round';
+  for(const t of trazos){if(t.pts.length<2)continue;
+    for(const[w,a]of[[18,.15],[9,.4],[3,1]]){x.strokeStyle=a===1?'#fff':t.c;x.globalAlpha=a;x.lineWidth=w;x.beginPath();x.moveTo(t.pts[0].x,t.pts[0].y);
+      for(let k=1;k<t.pts.length-1;k++){const m={x:(t.pts[k].x+t.pts[k+1].x)/2,y:(t.pts[k].y+t.pts[k+1].y)/2};x.quadraticCurveTo(t.pts[k].x,t.pts[k].y,m.x,m.y)}
+      x.lineTo(t.pts.at(-1).x,t.pts.at(-1).y);x.stroke()}}
+  x.globalAlpha=1;
+  for(const m of cursorMano){x.beginPath();x.arc(m.p.x,m.p.y,m.dibuja?10:14,0,7);if(m.dibuja){x.fillStyle=COLORES[ci];x.fill()}else{x.strokeStyle='#fff';x.lineWidth=2;x.stroke()}}
+}
+const R=(a,b)=>a+Math.random()*(b-a);
+
+const S=[];for(let i=0;i<1500;i++)S.push({x:R(0,innerWidth),y:R(0,innerHeight),vx:0,vy:0,h:R(0,360)});
+let F=[];
+let hands=[],mouse=null,detector=null,lastT=-1,hueShift=0,flash=0;
+addEventListener('pointermove',e=>mouse={x:e.clientX,y:e.clientY});
+
+function toScreen(l){const vw=video.videoWidth||640,vh=video.videoHeight||480,s=Math.max(W/vw,H/vh),ox=(W-vw*s)/2,oy=(H-vh*s)/2;return{x:W-(l.x*vw*s+ox),y:l.y*vh*s+oy}}
+
+function boom(px,py){
+  flash=1;hueShift+=60;
+  for(const p of S){const dx=p.x-px,dy=p.y-py,d=Math.hypot(dx,dy)+1;if(d<350){p.vx+=dx/d*25;p.vy+=dy/d*25}}
+  const n=EFECTOS[ef]==='rayos'?40:120;
+  for(let i=0;i<n;i++){const a=R(0,7),v=R(4,16);F.push({x:px,y:py,vx:Math.cos(a)*v,vy:Math.sin(a)*v,life:1,size:R(6,18)})}
+}
+
+function rayo(a,b,ancho,col){
+  const segs=10;x.strokeStyle=col;x.lineWidth=ancho;x.beginPath();x.moveTo(a.x,a.y);
+  const len=Math.hypot(b.x-a.x,b.y-a.y),nx=-(b.y-a.y)/len,ny=(b.x-a.x)/len;
+  for(let i=1;i<segs;i++){const t=i/segs,j=R(-1,1)*len*0.12;x.lineTo(a.x+(b.x-a.x)*t+nx*j,a.y+(b.y-a.y)*t+ny*j)}
+  x.lineTo(b.x,b.y);x.stroke();
+}
+
+function puntos(){const t=[];hands.forEach(h=>TIPS.forEach(i=>t.push(h[i])));if(!t.length&&mouse)t.push(mouse);return t}
+
+function enjambre(tg,colorFn){
+  x.globalCompositeOperation='lighter';
+  for(let k=0;k<S.length;k++){const p=S[k];
+    if(tg.length){const t=tg[k%tg.length],dx=t.x-p.x,dy=t.y-p.y,d=Math.hypot(dx,dy)+20;p.vx+=dx/d*.9-dy/d*.6;p.vy+=dy/d*.9+dx/d*.6}
+    p.vx*=.94;p.vy*=.94;p.x+=p.vx;p.y+=p.vy;
+    const sp=Math.min(Math.hypot(p.vx,p.vy),20);x.fillStyle=colorFn(p,sp);x.fillRect(p.x,p.y,1.5+sp*.15,1.5+sp*.15)}
+  x.globalCompositeOperation='source-over';
+}
+
+function fuego(tg){
+  for(const t of tg)for(let i=0;i<5;i++)F.push({x:t.x+R(-6,6),y:t.y+R(-6,6),vx:R(-1,1),vy:R(-4,-1),life:1,size:R(8,20)});
+  x.globalCompositeOperation='lighter';
+  F=F.filter(p=>{p.x+=p.vx;p.y+=p.vy;p.vy-=.08;p.vx*=.98;p.life-=.025;if(p.life<=0)return false;
+    const l=p.life,g=x.createRadialGradient(p.x,p.y,0,p.x,p.y,p.size*l+2);
+    g.addColorStop(0,`rgba(255,${(200*l)|0},${(80*l*l)|0},${l})`);g.addColorStop(.5,`rgba(255,${(90*l)|0},0,${l*.5})`);g.addColorStop(1,'rgba(120,0,0,0)');
+    x.fillStyle=g;x.beginPath();x.arc(p.x,p.y,p.size*l+2,0,7);x.fill();return true});
+  x.globalCompositeOperation='source-over';
+}
+
+function rayos(){
+  x.globalCompositeOperation='lighter';
+  const pares=[];
+  hands.forEach(h=>{[8,12,16,20].forEach(i=>pares.push([h[4],h[i]]))});
+  if(hands.length===2)pares.push([hands[0][8],hands[1][8]],[hands[0][4],hands[1][4]]);
+  if(!hands.length&&mouse)pares.push([{x:mouse.x-60,y:mouse.y},{x:mouse.x+60,y:mouse.y}]);
+  for(const[a,b]of pares){if(Math.random()<.85){rayo(a,b,8,'rgba(80,140,255,0.25)');rayo(a,b,3,'rgba(150,200,255,0.8)');rayo(a,b,1.2,'#fff')}}
+  for(const t of puntos()){const g=x.createRadialGradient(t.x,t.y,0,t.x,t.y,26);g.addColorStop(0,'rgba(200,230,255,.9)');g.addColorStop(1,'rgba(60,120,255,0)');x.fillStyle=g;x.beginPath();x.arc(t.x,t.y,26,0,7);x.fill()}
+  F=F.filter(p=>{p.x+=p.vx;p.y+=p.vy;p.vx*=.9;p.vy*=.9;p.life-=.04;if(p.life<=0)return false;x.strokeStyle=`rgba(170,210,255,${p.life})`;x.lineWidth=2;x.beginPath();x.moveTo(p.x,p.y);x.lineTo(p.x-p.vx*3,p.y-p.vy*3);x.stroke();return true});
+  x.globalCompositeOperation='source-over';
+}
+
+function loop(){
+  requestAnimationFrame(loop);
+  if(detector&&video.readyState>=2&&video.currentTime!==lastT){lastT=video.currentTime;const r=detector.detectForVideo(video,performance.now());hands=(r.landmarks||[]).map(h=>h.map(toScreen))}
+  const modo=EFECTOS[ef];
+  if(modo==='escribir'){escribir();return}
+  hands.forEach((h,i)=>{const d=Math.hypot(h[4].x-h[8].x,h[4].y-h[8].y);if(d<40&&!pin[i]){pin[i]=true;boom((h[4].x+h[8].x)/2,(h[4].y+h[8].y)/2)}else if(d>70)pin[i]=false});
+  x.globalCompositeOperation='destination-out';x.fillStyle=`rgba(0,0,0,${modo==='rayos'?0.6:0.3})`;x.fillRect(0,0,W,H);x.globalCompositeOperation='source-over';
+  const tg=puntos(),now=performance.now();
+  if(modo==='fuego')fuego(tg);
+  else if(modo==='rayos')rayos();
+  else if(modo==='hielo')enjambre(tg,(p,sp)=>`hsla(${190+(p.h%30)},90%,${60+sp*2}%,0.85)`);
+  else enjambre(tg,(p,sp)=>`hsla(${(p.h+hueShift+now*.02)%360},90%,${45+sp*2}%,0.8)`);
+  if(modo!=='fuego'&&modo!=='rayos'){F=F.filter(p=>{p.x+=p.vx;p.y+=p.vy;p.life-=.03;return p.life>0})}
+  const col={fuego:'rgba(255,170,80,0.6)',rayos:'rgba(150,200,255,0.6)',hielo:'rgba(170,230,255,0.6)','arcoíris':'rgba(175,169,236,0.7)'}[modo];
+  for(const h of hands){x.strokeStyle=col;x.lineWidth=2;x.beginPath();for(const[a,b]of LINKS){x.moveTo(h[a].x,h[a].y);x.lineTo(h[b].x,h[b].y)}x.stroke();x.fillStyle='#fff';for(const t of TIPS){x.beginPath();x.arc(h[t].x,h[t].y,4,0,7);x.fill()}}
+  if(flash>0){x.fillStyle=`rgba(255,255,255,${flash*.35})`;x.fillRect(0,0,W,H);flash-=.08}
+}
+const pin=[false,false];
+loop();
+
+const efb=document.getElementById('efx');
+const colb=document.getElementById('colbtn'),borb=document.getElementById('borrar'),hud=document.getElementById('hud');
+const HUD1=hud.textContent,HUD2='Levanta solo el índice para escribir · cierra la mano o abre más dedos para levantar el lápiz';
+function siguiente(){ef=(ef+1)%EFECTOS.length;efb.textContent='Efecto: '+EFECTOS[ef];F=[];x.clearRect(0,0,W,H);
+  const esc=EFECTOS[ef]==='escribir';colb.hidden=borb.hidden=!esc;hud.textContent=esc?HUD2:HUD1}
+function borrarTodo(){trazos=[];actual=[null,null]}
+efb.onclick=siguiente;borb.onclick=borrarTodo;
+colb.onclick=()=>{ci=(ci+1)%COLORES.length;colb.style.borderColor=COLORES[ci];colb.style.color=COLORES[ci]};
+colb.style.borderColor=colb.style.color=COLORES[0];
+addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();siguiente()}if(e.key==='b'||e.key==='B')borrarTodo();if(e.key==='c'||e.key==='C')colb.onclick()});
+
+document.getElementById('go').onclick=async()=>{
+  msg.innerHTML='Cargando el detector de manos...';
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{width:1280,height:720,facingMode:'user'}});
+    video.srcObject=stream;await video.play();
+    const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    detector=await HandLandmarker.createFromOptions(vision,{baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate:"GPU"},runningMode:"VIDEO",numHands:2});
+    msg.remove();
+  }catch(e){
+    msg.innerHTML='No pude usar la cámara o cargar el detector.<br>Revisa que diste permiso y que tienes internet.<br>Mientras tanto, los efectos siguen tu mouse.<br><button onclick="this.parentNode.remove()">Seguir con el mouse</button>';
+  }
+};
+const modos=[[1,'Cámara: visible'],[0.35,'Cámara: tenue'],[0,'Cámara: oculta']];let mi=0;
+document.getElementById('cambtn').onclick=e=>{mi=(mi+1)%3;video.style.opacity=modos[mi][0];e.target.textContent=modos[mi][1]};
+document.getElementById('fs').onclick=()=>{document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen().catch(()=>{})};
+</script>
+</body>
+</html>
